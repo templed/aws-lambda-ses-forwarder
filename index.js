@@ -249,6 +249,36 @@ exports.processMessage = function(data) {
 };
 
 /**
+ * Decide whether or not to actually send the email, based on the context/content/etc.
+ *
+ * @param {object} data - Data bundle with context, email, etc.
+ *
+ * @return {object} - Promise resolved with data.
+ */
+exports.milter = function(data) {
+  // Normal behaviour is to allow emails through. Any logic below should
+  // check if the email should *not* be sent.
+  data.doNotSend = false;
+  let match = data.emailData.match(/^((?:.+\r?\n)*)(\r?\n(?:.*\s+)*)/m);
+  let header = match && match[1] ? match[1] : data.emailData;
+  let body = match && match[2] ? match[2] : '';
+  let mailDeliveryFailurePatternMatch = body.match(/An error occurred while trying to deliver the mail to the following recipients:/m);
+  if (mailDeliveryFailurePatternMatch) {
+    data.doNotSend = true;
+    data.log({level: "info", message: "milter: Mail contains mail delivery " +
+        "failure string, not sending on."});
+  }
+  let fromMailerDaemonMatch = header.match(
+    /From: MAILER-DAEMON@[a-z0-9-]*.amazonses.com/);
+  if (fromMailerDaemonMatch) {
+    data.doNotSend = true;
+    data.log({level: "info", message: "milter: Mail is from MAILER-DAEMON, " +
+        "not sending on."});
+  }
+  return Promise.resolve(data);
+};
+
+/**
  * Send email using the SES sendRawEmail command.
  *
  * @param {object} data - Data bundle with context, email, etc.
@@ -263,6 +293,15 @@ exports.sendMessage = function(data) {
       Data: data.emailData
     }
   };
+  if (data.doNotSend) {
+    data.log({
+      level: "info",
+      message: "sendMessage: Not sending message via SES."
+    });
+    return new Promise(function(resolve, reject) {
+      resolve(data);
+    });
+  }
   data.log({level: "info", message: "sendMessage: Sending email via SES. " +
     "Original recipients: " + data.originalRecipients.join(", ") +
     ". Transformed recipients: " + data.recipients.join(", ") + "."});
@@ -297,6 +336,7 @@ exports.handler = function(event, context, callback, overrides) {
     exports.transformRecipients,
     exports.fetchMessage,
     exports.processMessage,
+    exports.milter,
     exports.sendMessage
   ];
   var data = {
